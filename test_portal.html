@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pocket Watch Config</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#111;color:#eee;font-family:'Segoe UI',system-ui,sans-serif;padding:20px;max-width:480px;margin:auto}
+h1{text-align:center;margin-bottom:8px;font-size:1.4em}
+.sub{text-align:center;color:#888;margin-bottom:20px;font-size:.85em}
+fieldset{border:1px solid #333;border-radius:8px;padding:16px;margin-bottom:16px}
+legend{color:#4fc3f7;font-weight:600;padding:0 6px}
+label{display:block;margin:8px 0 3px;font-size:.9em;color:#aaa}
+input[type=text],input[type=password],input[type=number]{width:100%;padding:8px;border:1px solid #444;border-radius:4px;background:#222;color:#eee;font-size:.95em}
+select{width:100%;padding:8px;border:1px solid #444;border-radius:4px;background:#222;color:#eee;font-size:.95em}
+button{display:block;width:100%;padding:10px;margin-top:12px;border:none;border-radius:6px;font-size:1em;font-weight:600;cursor:pointer;transition:background .2s}
+.btn-blue{background:#1976d2;color:#fff}.btn-blue:hover{background:#1565c0}
+.btn-green{background:#2e7d32;color:#fff}.btn-green:hover{background:#1b5e20}
+#status{background:#1a1a1a;border-radius:8px;padding:12px;margin-bottom:16px;font-size:.85em;line-height:1.6}
+.ok{color:#4caf50}.err{color:#f44336}
+.row{display:flex;gap:8px}.row>*{flex:1}
+</style>
+</head>
+<body>
+<h1>&#128348; Pocket Watch</h1>
+<p class="sub">Configuration Portal</p>
+
+<div id="status">
+<b>WiFi:</b> <span class="ok">Connected</span> (192.168.1.42) &nbsp;
+<b>AP:</b> 192.168.4.1<br>
+<b>RTC:</b> <span class="ok">OK</span> 2026-03-03 14:30:00 &nbsp;
+<b>NTP:</b> <span class="ok">Synced</span> 2026-03-03 14:30:00
+</div>
+
+<form action="/save" method="POST">
+<fieldset>
+<legend>WiFi</legend>
+<label>SSID</label>
+<input type="text" name="ssid" value="MyNetwork" placeholder="Your WiFi network" autocomplete="off">
+<label>Password</label>
+<input type="password" name="pass" value="password123" placeholder="WiFi password" autocomplete="off">
+<label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+<input type="checkbox" name="ap_only" style="width:18px;height:18px;accent-color:#f57c00">
+<span style="color:#f57c00;font-weight:600">AP Mode Only</span>
+</label>
+<p style="margin-top:4px;font-size:.78em;color:#777">
+When enabled, the watch only starts an access point and will not connect to a WiFi router. Useful when no router is available.
+</p>
+</fieldset>
+
+<fieldset>
+<legend>Time Sync (NTP)</legend>
+<label>NTP Server</label>
+<input type="text" name="ntp" value="pool.ntp.org" placeholder="pool.ntp.org">
+<label>Timezone (POSIX TZ string)</label>
+<input type="text" name="tz" value="GMT0" placeholder="GMT0">
+<p style="margin-top:6px;font-size:.78em;color:#777">
+Examples: <code>GMT0</code>, <code>GMT-1</code> (CET),
+<code>EST5EDT,M3.2.0,M11.1.0</code> (US Eastern),
+<code>AEST-10AEDT,M10.1.0,M4.1.0/3</code> (Sydney).<br>
+See <a href="https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv" target="_blank" style="color:#4fc3f7">full list</a>.
+</p>
+<label style="display:flex;align-items:center;gap:8px;margin-top:10px;cursor:pointer">
+<input type="checkbox" name="manual_time" style="width:18px;height:18px;accent-color:#f57c00">
+<span style="color:#f57c00;font-weight:600">Manual Time Only</span>
+</label>
+<p style="margin-top:4px;font-size:.78em;color:#777">
+When enabled, NTP and Bluetooth time sync are disabled.
+Use the manual RTC form below to set the time.
+Time priority (when off): NTP &rarr; Bluetooth &rarr; RTC.
+</p>
+</fieldset>
+<button type="submit" class="btn-blue">Save &amp; Restart</button>
+</form>
+
+<form action="/settime" method="POST" style="margin-top:16px">
+<fieldset>
+<legend>Set RTC Manually</legend>
+<div class="row">
+  <div><label>Year</label><input type="number" name="year" min="2024" max="2099" value="2026"></div>
+  <div><label>Month</label><input type="number" name="month" min="1" max="12" value="3"></div>
+  <div><label>Day</label><input type="number" name="day" min="1" max="31" value="3"></div>
+</div>
+<div class="row">
+  <div><label>Hour</label><input type="number" name="hour" min="0" max="23" value="14"></div>
+  <div><label>Minute</label><input type="number" name="minute" min="0" max="59" value="30"></div>
+  <div><label>Second</label><input type="number" name="second" min="0" max="59" value="0"></div>
+</div>
+<button type="submit" class="btn-green">Set RTC</button>
+</fieldset>
+</form>
+
+<fieldset style="margin-top:16px">
+<legend>Screens</legend>
+<p style="font-size:.78em;color:#777;margin-bottom:10px">
+Reorder and enable/disable screens. Drag to reorder. Clock is always first.
+</p>
+<div id="scr-list"></div>
+<button type="button" class="btn-blue" onclick="saveScr()" style="margin-top:8px">Save Screen Order</button>
+<div id="scr-msg" style="display:none;margin-top:8px;padding:8px;border-radius:4px;text-align:center;font-weight:600"></div>
+</fieldset>
+
+<script>
+/* ── Screen order manager (test mock, drag & drop) ── */
+const mockScreens = {
+  all: [
+    {id:0,name:"Clock",locked:true,enabled:true},
+    {id:1,name:"Stopwatch",locked:false,enabled:true},
+    {id:2,name:"Timer",locked:false,enabled:true},
+    {id:3,name:"Alarm",locked:false,enabled:true},
+    {id:4,name:"Weather",locked:false,enabled:true},
+    {id:5,name:"Radar",locked:false,enabled:true},
+    {id:6,name:"Compass",locked:false,enabled:true},
+    {id:7,name:"Media",locked:false,enabled:true}
+  ],
+  order: [0,1,2,3,4,5,6,7]
+};
+
+let scrData=[];
+let dragIdx=null;
+function loadScr(){
+  const d=mockScreens;
+  scrData=[];
+  const active=d.order.map(id=>d.all.find(s=>s.id===id));
+  active.forEach(s=>{s.enabled=true;scrData.push(s)});
+  d.all.forEach(s=>{
+    if(!scrData.find(x=>x.id===s.id)){s.enabled=false;scrData.push(s)}
+  });
+  renderScr();
+}
+function renderScr(){
+  const el=document.getElementById('scr-list');
+  el.innerHTML='';
+  scrData.forEach((s,i)=>{
+    const d=document.createElement('div');
+    d.dataset.idx=i;
+    d.style.cssText='display:flex;align-items:center;gap:8px;padding:10px 12px;margin:3px 0;background:#1a1a1a;border-radius:6px;border:1px solid #333;transition:transform .15s,opacity .15s';
+    if(s.locked){
+      d.innerHTML='<span style="color:#4fc3f7;font-size:1.1em;min-width:22px">&#128348;</span>'
+        +'<span style="flex:1;font-weight:600">'+s.name+'</span>'
+        +'<span style="font-size:.75em;color:#666">Always on</span>';
+    }else{
+      d.draggable=true;
+      d.style.cursor='grab';
+      d.style.opacity=s.enabled?'1':'.4';
+      d.innerHTML='<span style="color:#555;font-size:1.2em;margin-right:2px">\u2630</span>'
+        +'<span style="flex:1">'+s.name+'</span>'
+        +'<label style="position:relative;display:inline-block;width:40px;height:22px;cursor:pointer" onclick="event.stopPropagation()">'
+        +'<input type="checkbox" '+(s.enabled?'checked':'')+' onchange="scrTog('+i+',this.checked)" style="opacity:0;width:0;height:0">'
+        +'<span style="position:absolute;inset:0;background:'+(s.enabled?'#2e7d32':'#444')+';border-radius:11px;transition:.3s"></span>'
+        +'<span style="position:absolute;top:2px;left:'+(s.enabled?'20':'2')+'px;width:18px;height:18px;background:#eee;border-radius:50%;transition:.3s"></span>'
+        +'</label>';
+      d.addEventListener('dragstart',e=>{
+        dragIdx=i;
+        d.style.opacity='.5';
+        e.dataTransfer.effectAllowed='move';
+      });
+      d.addEventListener('dragend',()=>{dragIdx=null;renderScr()});
+      d.addEventListener('dragover',e=>{
+        e.preventDefault();
+        e.dataTransfer.dropEffect='move';
+        d.style.borderColor='#4fc3f7';
+      });
+      d.addEventListener('dragleave',()=>{d.style.borderColor='#333'});
+      d.addEventListener('drop',e=>{
+        e.preventDefault();
+        if(dragIdx!==null&&dragIdx!==i&&dragIdx>=1&&i>=1){
+          const item=scrData.splice(dragIdx,1)[0];
+          scrData.splice(i,0,item);
+        }
+        dragIdx=null;
+        renderScr();
+      });
+      /* Touch drag support */
+      d.addEventListener('touchstart',e=>{
+        dragIdx=i;
+        d.style.opacity='.5';
+      },{passive:true});
+      d.addEventListener('touchmove',e=>{
+        const t=e.touches[0];
+        const el=document.elementFromPoint(t.clientX,t.clientY);
+        if(el){
+          const row=el.closest('[data-idx]');
+          if(row) row.style.borderColor='#4fc3f7';
+        }
+      },{passive:true});
+      d.addEventListener('touchend',e=>{
+        const t=e.changedTouches[0];
+        const el=document.elementFromPoint(t.clientX,t.clientY);
+        if(el){
+          const row=el.closest('[data-idx]');
+          if(row){
+            const ti=parseInt(row.dataset.idx);
+            if(dragIdx!==null&&dragIdx!==ti&&dragIdx>=1&&ti>=1){
+              const item=scrData.splice(dragIdx,1)[0];
+              scrData.splice(ti,0,item);
+            }
+          }
+        }
+        dragIdx=null;
+        renderScr();
+      });
+    }
+    el.appendChild(d);
+  });
+}
+function scrTog(i,on){
+  scrData[i].enabled=on;
+  renderScr();
+}
+function saveScr(){
+  const ids=scrData.filter(s=>s.enabled&&!s.locked).map(s=>s.id).join(',');
+  const m=document.getElementById('scr-msg');
+  m.style.display='block';
+  m.style.background='#1b5e20';
+  m.textContent='Screen order saved! (order='+ids+')';
+  setTimeout(()=>m.style.display='none',3000);
+}
+loadScr();
+</script>
+
+</body>
+</html>
