@@ -37,9 +37,12 @@
 #define DOT_GAP    12
 #define DOT_BOTTOM 24
 
-#define SWIPE_THRESHOLD  60   /* px drag to trigger page change      */
-#define ANIM_DURATION    250  /* ms for slide animation               */
+#define SWIPE_THRESHOLD  60   /* px drag to trigger page change       */
+#define ANIM_DURATION    200  /* ms for slide animation               */
 #define DRAG_MIN_DELTA    3   /* min px change to re-layout           */
+#define FLICK_VEL_THRESH 300  /* px/sec to trigger velocity-based swipe */
+#define FLICK_MIN_DIST    15  /* min px movement for velocity swipe    */
+#define VEL_WINDOW_MS     80  /* velocity sampling window (ms)         */
 
 /* ── Colours (match clock_face.c) ──────────────────────────────── */
 #define COL_BG          lv_color_make(10, 10, 15)
@@ -99,6 +102,11 @@ static lv_coord_t drag_offset  = 0;  /* current drag delta (px)   */
 static bool      was_pressed   = false;  /* previous frame press state */
 #define DRAG_LOCK_RATIO 1  /* if |dy| > |dx| at lock point, lock vertical */
 
+/* Velocity tracking for flick detection */
+static lv_coord_t vel_ref_x    = 0;
+static uint32_t   vel_ref_time = 0;
+static int        anim_vel_hint = 0;   /* px/sec at release, for adaptive duration */
+
 /* ── Gradient band data (same as clock_face.c) ─────────────────── */
 typedef struct { int r_mod; uint8_t r, g, b; } grad_t;
 static const grad_t grad_bands[] = {
@@ -119,6 +127,14 @@ static int wrap_idx(int i) {
     return ((i % active_count) + active_count) % active_count;
 }
 
+/* Track currently visible tiles to avoid redundant lv_obj_set_pos / flag changes */
+static int vis_cur  = -1;
+static int vis_prev = -1;
+static int vis_next = -1;
+
+/* Forward-declare so _layout_tiles can reference it for 2-screen case */
+static lv_coord_t anim_start_off;
+
 /* ── Position tiles around cur_virt + drag_offset ──────────────── */
 /*  Only the current tile and its two neighbours are visible.
     Everything else is hidden so LVGL skips all widget processing. */
@@ -130,27 +146,46 @@ static void _layout_tiles(void) {
     int phys_prev = active_order[virt_prev];
     int phys_next = active_order[virt_next];
 
-    for (int i = 0; i < SCR_COUNT; i++) {
-        if (!tiles[i]) continue;
-        if (i == phys_cur) {
-            lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(tiles[i], drag_offset, 0);
-        } else if (i == phys_prev) {
-            lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(tiles[i], drag_offset - scr_w, 0);
-        } else if (i == phys_next) {
-            lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(tiles[i], drag_offset + scr_w, 0);
-        } else {
-            lv_obj_add_flag(tiles[i], LV_OBJ_FLAG_HIDDEN);
-            lv_obj_set_pos(tiles[i], scr_w * 3, 0);   /* off-screen */
+    /* If visible set changed, update hidden/shown flags */
+    if (phys_cur != vis_cur || phys_prev != vis_prev || phys_next != vis_next) {
+        for (int i = 0; i < SCR_COUNT; i++) {
+            if (!tiles[i]) continue;
+            if (i == phys_cur || i == phys_prev || i == phys_next) {
+                lv_obj_clear_flag(tiles[i], LV_OBJ_FLAG_HIDDEN);
+            } else if (i == vis_cur || i == vis_prev || i == vis_next ||
+                       vis_cur < 0) {
+                /* Only hide tiles that were previously visible (or first call) */
+                lv_obj_add_flag(tiles[i], LV_OBJ_FLAG_HIDDEN);
+                lv_obj_set_pos(tiles[i], scr_w * 3, 0);
+            }
         }
+        vis_cur  = phys_cur;
+        vis_prev = phys_prev;
+        vis_next = phys_next;
+    }
+
+    /* Update positions of the visible tiles */
+    lv_obj_set_pos(tiles[phys_cur], drag_offset, 0);
+    if (phys_prev == phys_next) {
+        /* Only 2 screens: place the other tile on the side the user is
+           dragging toward so both swipe directions work.  During
+           animation cur_virt is already set to the target, so the
+           tile that *was* current is now prev; place it opposite the
+           travel direction (anim goes toward 0 from anim_start_off). */
+        if (animating)
+            lv_obj_set_pos(tiles[phys_prev],
+                           drag_offset + (anim_start_off > 0 ? -scr_w : scr_w), 0);
+        else
+            lv_obj_set_pos(tiles[phys_prev],
+                           drag_offset + (drag_offset >= 0 ? -scr_w : scr_w), 0);
+    } else {
+        lv_obj_set_pos(tiles[phys_prev], drag_offset - scr_w, 0);
+        lv_obj_set_pos(tiles[phys_next], drag_offset + scr_w, 0);
     }
 }
 
 /* ── Animation callback: animate drag_offset → 0 ──────────────── */
 static int       anim_target     = 0;
-static lv_coord_t anim_start_off = 0;
 
 static void _anim_exec(void *var, int32_t val) {
     (void)var;
@@ -174,8 +209,16 @@ static void _animate_to(int target_virt, lv_coord_t current_offset) {
     if (target_virt != cur_virt) {
         int old = cur_virt;
         cur_virt = target_virt;
-        /* Translate offset into the new tile's frame of reference. */
-        if (target_virt == wrap_idx(old + 1)) {
+        /* Translate offset into the new tile's frame of reference.
+           With only 2 screens wrap_idx(old+1)==wrap_idx(old-1), so
+           use the actual drag direction (offset sign) instead. */
+        bool swiped_left;
+        if (active_count == 2)
+            swiped_left = (current_offset < 0);
+        else
+            swiped_left = (target_virt == wrap_idx(old + 1));
+
+        if (swiped_left) {
             /* swiped left → target was to the right */
             anim_start_off = current_offset + scr_w;
         } else {
@@ -194,7 +237,12 @@ static void _animate_to(int target_virt, lv_coord_t current_offset) {
     lv_anim_set_var(&a, NULL);
     lv_anim_set_exec_cb(&a, _anim_exec);
     lv_anim_set_values(&a, anim_start_off, 0);
-    lv_anim_set_time(&a, ANIM_DURATION);
+    /* Adapt duration: faster flick → shorter settle animation */
+    int dur = ANIM_DURATION;
+    int abs_vel = anim_vel_hint < 0 ? -anim_vel_hint : anim_vel_hint;
+    if (abs_vel > 600)      dur = 120;
+    else if (abs_vel > 400) dur = 150;
+    lv_anim_set_time(&a, dur);
     lv_anim_set_path_cb(&a, lv_anim_path_ease_out);
     lv_anim_set_ready_cb(&a, _anim_ready);
     lv_anim_start(&a);
@@ -222,6 +270,8 @@ static void _poll_swipe(void) {
         drag_start_x = pt.x;
         drag_start_y = pt.y;
         drag_offset = 0;
+        vel_ref_x = pt.x;
+        vel_ref_time = lv_tick_get();
     }
     else if (pressed && dragging) {
         if (drag_locked_v) goto done;
@@ -257,6 +307,15 @@ static void _poll_swipe(void) {
                 _layout_tiles();
             }
         }
+
+        /* Update velocity reference periodically */
+        {
+            uint32_t now_ms = lv_tick_get();
+            if (now_ms - vel_ref_time >= VEL_WINDOW_MS) {
+                vel_ref_x = pt.x;
+                vel_ref_time = now_ms;
+            }
+        }
     }
     else if (!pressed && was_pressed && dragging) {
         dragging = false;
@@ -268,11 +327,21 @@ static void _poll_swipe(void) {
         drag_locked_h = false;
 
         lv_coord_t off = drag_offset;
-        if (off < -SWIPE_THRESHOLD) {
+
+        /* Calculate release velocity for flick detection */
+        uint32_t dt_ms = lv_tick_get() - vel_ref_time;
+        if (dt_ms < 1) dt_ms = 1;
+        int32_t vel_pps = (int32_t)(pt.x - vel_ref_x) * 1000 / (int32_t)dt_ms;
+        anim_vel_hint = (int)vel_pps;
+
+        if (off < -SWIPE_THRESHOLD ||
+            (off < -FLICK_MIN_DIST && vel_pps < -FLICK_VEL_THRESH)) {
             _animate_to(wrap_idx(cur_virt + 1), off);
-        } else if (off > SWIPE_THRESHOLD) {
+        } else if (off > SWIPE_THRESHOLD ||
+                   (off > FLICK_MIN_DIST && vel_pps > FLICK_VEL_THRESH)) {
             _animate_to(wrap_idx(cur_virt - 1), off);
         } else {
+            anim_vel_hint = 0;
             _animate_to(cur_virt, off);
         }
     }
@@ -510,9 +579,14 @@ void screen_manager_init(lv_obj_t *parent, int diameter) {
 
 void screen_manager_loop(void) {
     _poll_swipe();
-    stopwatch_loop();
-    timer_screen_loop();
-    alarm_screen_loop();
+    /* Skip sub-screen UI updates during animation – the screens are
+       sliding off-screen so visual updates are wasted work.  The
+       underlying timers/counters still tick via their own interrupts. */
+    if (!animating) {
+        stopwatch_loop();
+        timer_screen_loop();
+        alarm_screen_loop();
+    }
 }
 
 bool screen_manager_is_swiping(void) {
@@ -576,6 +650,7 @@ void screen_manager_goto(int phys_idx) {
     } else {
         start = scr_w;   /* slide right */
     }
+    anim_vel_hint = 0;   /* programmatic navigation: use default duration */
     _animate_to(virt, start);
 }
 
@@ -651,6 +726,7 @@ void screen_manager_set_screen_order(const int *phys_ids, int count) {
     /* Reset to clock screen */
     cur_virt = 0;
     drag_offset = 0;
+    vis_cur = vis_prev = vis_next = -1;  /* force full visibility update */
     _layout_tiles();
     screen_manager_update_indicators();
 }

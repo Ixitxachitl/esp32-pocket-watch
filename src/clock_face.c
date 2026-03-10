@@ -123,6 +123,10 @@ static lv_obj_t *orrery_val_lbl = NULL;
 static bool use_metric = true;  /* default: metric (°C, km/h) */
 static lv_obj_t *unit_val_lbl = NULL;
 
+/* Wake on motion */
+static bool wake_motion = false;  /* default: off */
+static lv_obj_t *wake_motion_sw = NULL;
+
 static bool screen_on  = true;
 static uint32_t last_activity_tick = 0;
 static lv_obj_t *sleep_overlay = NULL;  /* absorbs touches while screen off */
@@ -432,6 +436,11 @@ static void _menu_orrery_cb(lv_event_t *e) {
     orrery_on = !orrery_on;
     _update_orrery_label();
     _orrery_set_visible(orrery_on);
+    if (cb_settings_changed) cb_settings_changed();
+}
+
+static void _menu_wake_motion_cb(lv_event_t *e) {
+    wake_motion = lv_obj_has_state(wake_motion_sw, LV_STATE_CHECKED);
     if (cb_settings_changed) cb_settings_changed();
 }
 
@@ -1168,6 +1177,36 @@ void clock_face_create_overlays(lv_obj_t *overlay_parent) {
 
         lv_obj_add_event_cb(unit_btn, _menu_unit_cb, LV_EVENT_CLICKED, NULL);
 
+        /* ── Wake on Motion row ── */
+        lv_obj_t *wom_row = lv_obj_create(menu_panel);
+        lv_obj_set_size(wom_row, lv_pct(100), 46);
+        lv_obj_set_style_bg_color(wom_row, lv_color_make(30, 30, 45), 0);
+        lv_obj_set_style_bg_opa(wom_row, LV_OPA_COVER, 0);
+        lv_obj_set_style_radius(wom_row, 12, 0);
+        lv_obj_set_style_border_width(wom_row, 0, 0);
+        lv_obj_set_style_pad_all(wom_row, 0, 0);
+        lv_obj_clear_flag(wom_row, LV_OBJ_FLAG_SCROLLABLE);
+
+        lv_obj_t *wom_icon = lv_label_create(wom_row);
+        lv_label_set_text(wom_icon, LV_SYMBOL_REFRESH);
+        lv_obj_set_style_text_color(wom_icon, lv_color_make(120, 200, 160), 0);
+        lv_obj_set_style_text_font(wom_icon, &lv_font_montserrat_24, 0);
+        lv_obj_align(wom_icon, LV_ALIGN_LEFT_MID, 8, 0);
+
+        lv_obj_t *wom_lbl = lv_label_create(wom_row);
+        lv_label_set_text(wom_lbl, "Wake");
+        lv_obj_set_style_text_color(wom_lbl, lv_color_white(), 0);
+        lv_obj_set_style_text_font(wom_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_align(wom_lbl, LV_ALIGN_LEFT_MID, 44, 0);
+
+        wake_motion_sw = lv_switch_create(wom_row);
+        lv_obj_set_size(wake_motion_sw, 50, 26);
+        lv_obj_align(wake_motion_sw, LV_ALIGN_RIGHT_MID, -8, 0);
+        lv_obj_set_style_bg_color(wake_motion_sw, lv_color_make(60, 60, 70), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(wake_motion_sw, lv_color_make(40, 120, 220), LV_PART_INDICATOR | LV_STATE_CHECKED);
+        if (wake_motion) lv_obj_add_state(wake_motion_sw, LV_STATE_CHECKED);
+        lv_obj_add_event_cb(wake_motion_sw, _menu_wake_motion_cb, LV_EVENT_VALUE_CHANGED, NULL);
+
         /* Event: Scrim clicked → close menu */
         lv_obj_add_event_cb(menu_scrim, _menu_scrim_cb, LV_EVENT_CLICKED, NULL);
 
@@ -1617,4 +1656,16 @@ bool clock_face_get_metric(void) {
 void clock_face_set_metric(bool metric) {
     use_metric = metric;
     _update_unit_label();
+}
+
+bool clock_face_get_wake_motion(void) {
+    return wake_motion;
+}
+
+void clock_face_set_wake_motion(bool on) {
+    wake_motion = on;
+    if (wake_motion_sw) {
+        if (on) lv_obj_add_state(wake_motion_sw, LV_STATE_CHECKED);
+        else    lv_obj_clear_state(wake_motion_sw, LV_STATE_CHECKED);
+    }
 }

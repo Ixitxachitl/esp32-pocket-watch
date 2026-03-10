@@ -103,6 +103,10 @@ void clock_face_set_orrery(bool on);
 bool clock_face_get_metric(void);
 void clock_face_set_metric(bool metric);
 
+/* Get/set wake-on-motion (raise-to-wake via IMU) */
+bool clock_face_get_wake_motion(void);
+void clock_face_set_wake_motion(bool on);
+
 #ifdef __cplusplus
 }
 #endif

@@ -53,13 +53,14 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
     6 /* col_offset */, 0, 0, 0);
 
 // ── LVGL draw buffer ────────────────────────────────────────────────────────
-// Full-frame double-buffered in PSRAM for clean refreshes (no partial artifacts).
+// Single full-frame buffer in PSRAM for direct_mode rendering.
 // A small internal-DMA staging buffer shuttles pixel data to the QSPI display.
+// Single buffer is optimal here: the flush is synchronous (blocking SPI),
+// so double-buffering adds a costly PSRAM sync copy with zero benefit.
 static const uint32_t LV_BUF_SIZE     = LCD_WIDTH * LCD_HEIGHT;  // full frame in PSRAM
 static const uint32_t STAGING_LINES   = 120;               // SPI staging strip (larger = fewer DMA roundtrips)
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf1    = nullptr;   // PSRAM
-static lv_color_t *buf2    = nullptr;   // PSRAM
 static lv_color_t *staging = nullptr;   // internal DMA
 
 // ── LVGL flush callback ────────────────────────────────────────────────────
@@ -100,16 +101,6 @@ static void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area,
     }
     gfx->endWrite();
 
-    /* direct_mode + double-buffer: copy the dirty area from the buffer
-       we just rendered into the other buffer so both stay in sync.
-       Without this, alternating frames show stale content → visual bounce. */
-    lv_color_t *other = (color_p == buf1) ? buf2 : buf1;
-    for (lv_coord_t row = area->y1; row <= area->y2; row++) {
-        memcpy((uint16_t *)other + (uint32_t)row * LCD_WIDTH + area->x1,
-               (uint16_t *)color_p + (uint32_t)row * LCD_WIDTH + area->x1,
-               w * sizeof(uint16_t));
-    }
-
     lv_disp_flush_ready(drv);
 }
 
@@ -130,6 +121,11 @@ static unsigned long sw_ped_last_step_ms = 0;  /* debounce              */
 #define SW_PED_THRESH      0.15f     /* g deviation to trigger step      */
 #define SW_PED_DEBOUNCE_MS 250       /* min ms between steps             */
 #define SW_PED_AVG_ALPHA   0.05f     /* low-pass for baseline            */
+
+/* Wake-on-motion detection */
+#define WOM_THRESH         0.12f     /* g deviation to trigger wake       */
+#define WOM_COOLDOWN_MS    1500      /* min ms between wake triggers      */
+static unsigned long wom_last_wake_ms = 0;
 
 // ── PMIC (AXP2101) ──────────────────────────────────────────────────────────
 XPowersAXP2101 pmic;
@@ -273,6 +269,7 @@ static void on_settings_changed(void) {
     watchPrefs.putBool("time_24h", clock_face_get_24h());
     watchPrefs.putBool("orrery_on", clock_face_get_orrery());
     watchPrefs.putBool("metric", clock_face_get_metric());
+    watchPrefs.putBool("wake_mot", clock_face_get_wake_motion());
     /* Persist alarm */
     watchPrefs.putInt("alarm_hr", alarm_screen_get_hour());
     watchPrefs.putInt("alarm_mn", alarm_screen_get_min());
@@ -284,6 +281,17 @@ static void on_settings_changed(void) {
     watchPrefs.putULong("tmr_rem", timer_screen_get_remaining_ms());
     /* Persist stopwatch elapsed */
     watchPrefs.putULong("sw_ms", stopwatch_get_elapsed_ms());
+    /* Persist screen order */
+    {
+        int order[SCR_COUNT];
+        int cnt = screen_manager_get_screen_order(order, SCR_COUNT);
+        String s;
+        for (int i = 0; i < cnt; i++) {
+            if (i > 0) s += ',';
+            s += String(order[i]);
+        }
+        watchPrefs.putString("scr_ord", s);
+    }
     Serial.println("Settings saved to NVS");
 }
 
@@ -303,6 +311,8 @@ void setup() {
     bool saved_24h = watchPrefs.getBool("time_24h", true);  /* default: 24-hour */
     bool saved_orrery = watchPrefs.getBool("orrery_on", true);  /* default: on */
     bool saved_metric = watchPrefs.getBool("metric", true);  /* default: metric */
+    bool saved_wake_motion = watchPrefs.getBool("wake_mot", false);  /* default: off */
+    String saved_scr_order = watchPrefs.getString("scr_ord", "");
 
     // ── Initialise AXP2101 PMIC (must be first – it powers other I2C devices) ─
     if (pmic.begin(Wire, AXP2101_SLAVE_ADDRESS, IIC_SDA, IIC_SCL)) {
@@ -361,16 +371,14 @@ void setup() {
        to shuttle chunks to the QSPI display (SPI DMA needs internal SRAM). */
     buf1 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
                                            MALLOC_CAP_SPIRAM);
-    buf2 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
-                                           MALLOC_CAP_SPIRAM);
     staging = (lv_color_t *)heap_caps_malloc(
                   LCD_WIDTH * STAGING_LINES * sizeof(lv_color_t),
                   MALLOC_CAP_DMA);
-    if (!buf1 || !buf2 || !staging) {
+    if (!buf1 || !staging) {
         Serial.println("LVGL buffer alloc failed!");
         while (true) delay(1000);
     }
-    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LV_BUF_SIZE);
+    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LV_BUF_SIZE);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -416,7 +424,17 @@ void setup() {
                                     ti.tm_mday, ti.tm_hour, ti.tm_min);
         }
     }
-    if (wifi_enabled) {
+    /* Restore screen order – try watchPrefs first, fall back to config portal */
+    if (saved_scr_order.length() > 0) {
+        int ids[SCR_COUNT], cnt = 0, start = 0;
+        for (int i = 0; i <= (int)saved_scr_order.length() && cnt < SCR_COUNT; i++) {
+            if (i == (int)saved_scr_order.length() || saved_scr_order[i] == ',') {
+                if (i > start) ids[cnt++] = saved_scr_order.substring(start, i).toInt();
+                start = i + 1;
+            }
+        }
+        screen_manager_set_screen_order(ids, cnt);
+    } else if (wifi_enabled) {
         configPortalApplyScreenOrder();
     }
 
@@ -433,6 +451,7 @@ void setup() {
     clock_face_set_24h(saved_24h);
     clock_face_set_orrery(saved_orrery);
     clock_face_set_metric(saved_metric);
+    clock_face_set_wake_motion(saved_wake_motion);
     clock_face_set_steps(0);
 
     /* Restore alarm, timer, stopwatch from NVS */
@@ -471,7 +490,24 @@ void loop() {
         pmic.clearIrqStatus();
     }
 
-    // Service LVGL
+    // Wake-on-motion: poll IMU even while screen is off
+    if (!screen_active && clock_face_get_wake_motion() && imu_ok && imu.getDataReady()) {
+        float ax, ay, az;
+        if (imu.getAccelerometer(ax, ay, az)) {
+            float mag = sqrtf(ax * ax + ay * ay + az * az);
+            float dev = mag - sw_ped_avg;
+            if (dev < 0) dev = -dev;
+            if (dev > WOM_THRESH) {
+                unsigned long now_ms = millis();
+                if (now_ms - wom_last_wake_ms >= WOM_COOLDOWN_MS) {
+                    wom_last_wake_ms = now_ms;
+                    clock_face_wake();
+                }
+            }
+        }
+    }
+
+    // Service LVGL (render + input processing)
     lv_timer_handler();
 
     // Service Gadgetbridge BLE

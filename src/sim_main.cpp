@@ -377,6 +377,13 @@ int main(int argc, char **argv) {
         /* Process screen timeout / wake */
         clock_face_process_activity();
 
+        /* Service LVGL (render + input) */
+        lv_timer_handler();
+
+        /* Service screen manager */
+        screen_manager_loop();
+        screen_manager_set_time(t->tm_hour, t->tm_min, t->tm_sec);
+
         /* Service Gadgetbridge TCP */
         if (sim_bt) {
             gb_loop();
@@ -385,10 +392,6 @@ int main(int argc, char **argv) {
 
         /* Service sound */
         sound_loop();
-
-        /* Service screen manager (stopwatch, timer, alarm) */
-        screen_manager_loop();
-        screen_manager_set_time(t->tm_hour, t->tm_min, t->tm_sec);
 
         /* Update clock every second */
         now = time(NULL);
@@ -440,8 +443,6 @@ int main(int argc, char **argv) {
                 radar_screen_update(rnodes, active);
             }
         }
-
-        lv_timer_handler();
 
         /* Feed simulated compass (slow drift + gentle tilt) */
         {
