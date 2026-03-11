@@ -254,10 +254,14 @@ static void on_screen_power(bool on) {
     if (on) {
         setCpuFrequencyMhz(240);
         Serial.println("Screen: ON (240 MHz)");
+        gfx->displayOn();            /* SLPOUT – wake the AMOLED panel */
         gfx->setBrightness(200);
+        digitalWrite(PA, HIGH);       /* re-enable power amplifier      */
     } else {
         Serial.println("Screen: OFF (80 MHz)");
         gfx->setBrightness(0);
+        gfx->displayOff();            /* SLPIN – puts AMOLED into sleep */
+        digitalWrite(PA, LOW);        /* disable power amplifier        */
         setCpuFrequencyMhz(80);
     }
 }
@@ -366,7 +370,7 @@ void setup() {
     // ── LVGL init ───────────────────────────────────────────────────────────
     lv_init();
 
-    /* Render buffers in PSRAM (large, for fewer strips/less tearing).
+    /* Render buffer in PSRAM (full frame for direct_mode).
        A small internal-DMA staging buffer is used in the flush callback
        to shuttle chunks to the QSPI display (SPI DMA needs internal SRAM). */
     buf1 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
@@ -505,6 +509,18 @@ void loop() {
                 }
             }
         }
+    }
+
+    // When screen is off, skip LVGL rendering and throttle the loop
+    if (!screen_active) {
+        // Still service BLE so notifications/time sync arrive
+        if (bt_enabled) gb_loop();
+        // Service timer/alarm (they can fire while screen off)
+        screen_manager_loop();
+        sound_loop();
+        // Throttle CPU – 50 ms idle gives ~20 Hz poll rate for button/IMU
+        delay(50);
+        return;
     }
 
     // Service LVGL (render + input processing)
