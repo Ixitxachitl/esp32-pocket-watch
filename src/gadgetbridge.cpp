@@ -78,6 +78,27 @@ static bool json_get_bool(const char *json, const char *key, bool *out) {
     return true;
 }
 
+/* ── Apply E.setTimeZone(offset) ─────────────────────────────── */
+static void apply_timezone(const char *tz_str) {
+    float tz_hours = atof(tz_str + 14);
+    /* Build POSIX TZ string: offset sign is inverted (UTC-7 = UTC+7 in POSIX) */
+    int tz_sec = (int)(tz_hours * 3600.0f);
+    int sign = (tz_sec >= 0) ? -1 : 1;  /* POSIX inverts sign */
+    int abs_sec = (tz_sec < 0) ? -tz_sec : tz_sec;
+    int h = abs_sec / 3600;
+    int m = (abs_sec % 3600) / 60;
+    char posix_tz[32];
+    if (m > 0)
+        snprintf(posix_tz, sizeof(posix_tz), "UTC%c%d:%02d",
+                 sign > 0 ? '+' : '-', h, m);
+    else
+        snprintf(posix_tz, sizeof(posix_tz), "UTC%c%d",
+                 sign > 0 ? '+' : '-', h);
+    setenv("TZ", posix_tz, 1);
+    tzset();
+    Serial.printf("GB timezone: %.1f h → TZ=%s\n", tz_hours, posix_tz);
+}
+
 /* ── Process a complete line from Gadgetbridge ───────────────── */
 static void process_line(const char *line) {
     /* Skip leading control chars (e.g. 0x10 DLE framing byte from Gadgetbridge) */
@@ -86,30 +107,19 @@ static void process_line(const char *line) {
 
     Serial.printf("GB rx: %s\n", line);
 
-    /* setTime(epoch) – also extract timezone from E.setTimeZone() if present */
+    /* E.setTimeZone(offset) – may arrive on its own line or after setTime */
+    if (strncmp(line, "E.setTimeZone(", 14) == 0) {
+        apply_timezone(line);
+        return;
+    }
+
+    /* setTime(epoch) – also check for E.setTimeZone() on the same line */
     if (strncmp(line, "setTime(", 8) == 0) {
         long epoch = atol(line + 8);
-        /* Look for E.setTimeZone(offset) in the same line */
+        /* Look for E.setTimeZone(offset) appended after semicolon */
         const char *tz_str = strstr(line, "E.setTimeZone(");
-        if (tz_str) {
-            float tz_hours = atof(tz_str + 14);
-            /* Build POSIX TZ string: offset sign is inverted (UTC-7 = UTC+7 in POSIX) */
-            int tz_sec = (int)(tz_hours * 3600.0f);
-            int sign = (tz_sec >= 0) ? -1 : 1;  /* POSIX inverts sign */
-            int abs_sec = (tz_sec < 0) ? -tz_sec : tz_sec;
-            int h = abs_sec / 3600;
-            int m = (abs_sec % 3600) / 60;
-            char posix_tz[32];
-            if (m > 0)
-                snprintf(posix_tz, sizeof(posix_tz), "UTC%c%d:%02d",
-                         sign > 0 ? '+' : '-', h, m);
-            else
-                snprintf(posix_tz, sizeof(posix_tz), "UTC%c%d",
-                         sign > 0 ? '+' : '-', h);
-            setenv("TZ", posix_tz, 1);
-            tzset();
-            Serial.printf("GB timezone: %.1f h → TZ=%s\n", tz_hours, posix_tz);
-        }
+        if (tz_str)
+            apply_timezone(tz_str);
         if (epoch > 0) {
             struct timeval tv = { .tv_sec = (time_t)epoch, .tv_usec = 0 };
             settimeofday(&tv, NULL);
