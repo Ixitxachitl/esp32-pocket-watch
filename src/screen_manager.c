@@ -579,14 +579,9 @@ void screen_manager_init(lv_obj_t *parent, int diameter) {
 
 void screen_manager_loop(void) {
     _poll_swipe();
-    /* Skip sub-screen UI updates during animation – the screens are
-       sliding off-screen so visual updates are wasted work.  The
-       underlying timers/counters still tick via their own interrupts. */
-    if (!animating) {
-        stopwatch_loop();
-        timer_screen_loop();
-        alarm_screen_loop();
-    }
+    stopwatch_loop();
+    timer_screen_loop();
+    alarm_screen_loop();
 }
 
 bool screen_manager_is_swiping(void) {

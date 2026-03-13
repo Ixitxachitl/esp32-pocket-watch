@@ -53,14 +53,13 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
     6 /* col_offset */, 0, 0, 0);
 
 // ── LVGL draw buffer ────────────────────────────────────────────────────────
-// Single full-frame buffer in PSRAM for direct_mode rendering.
+// Full-frame double-buffered in PSRAM for clean refreshes (no partial artifacts).
 // A small internal-DMA staging buffer shuttles pixel data to the QSPI display.
-// Single buffer is optimal here: the flush is synchronous (blocking SPI),
-// so double-buffering adds a costly PSRAM sync copy with zero benefit.
 static const uint32_t LV_BUF_SIZE     = LCD_WIDTH * LCD_HEIGHT;  // full frame in PSRAM
 static const uint32_t STAGING_LINES   = 120;               // SPI staging strip (larger = fewer DMA roundtrips)
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf1    = nullptr;   // PSRAM
+static lv_color_t *buf2    = nullptr;   // PSRAM
 static lv_color_t *staging = nullptr;   // internal DMA
 
 // ── LVGL flush callback ────────────────────────────────────────────────────
@@ -100,6 +99,16 @@ static void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area,
         rows_left -= chunk_h;
     }
     gfx->endWrite();
+
+    /* direct_mode + double-buffer: copy the dirty area from the buffer
+       we just rendered into the other buffer so both stay in sync.
+       Without this, alternating frames show stale content → visual bounce. */
+    lv_color_t *other = (color_p == buf1) ? buf2 : buf1;
+    for (lv_coord_t row = area->y1; row <= area->y2; row++) {
+        memcpy((uint16_t *)other + (uint32_t)row * LCD_WIDTH + area->x1,
+               (uint16_t *)color_p + (uint32_t)row * LCD_WIDTH + area->x1,
+               w * sizeof(uint16_t));
+    }
 
     lv_disp_flush_ready(drv);
 }
@@ -254,14 +263,10 @@ static void on_screen_power(bool on) {
     if (on) {
         setCpuFrequencyMhz(240);
         Serial.println("Screen: ON (240 MHz)");
-        gfx->displayOn();            /* SLPOUT – wake the AMOLED panel */
         gfx->setBrightness(200);
-        digitalWrite(PA, HIGH);       /* re-enable power amplifier      */
     } else {
         Serial.println("Screen: OFF (80 MHz)");
         gfx->setBrightness(0);
-        gfx->displayOff();            /* SLPIN – puts AMOLED into sleep */
-        digitalWrite(PA, LOW);        /* disable power amplifier        */
         setCpuFrequencyMhz(80);
     }
 }
@@ -370,19 +375,21 @@ void setup() {
     // ── LVGL init ───────────────────────────────────────────────────────────
     lv_init();
 
-    /* Render buffer in PSRAM (full frame for direct_mode).
+    /* Render buffers in PSRAM (large, for fewer strips/less tearing).
        A small internal-DMA staging buffer is used in the flush callback
        to shuttle chunks to the QSPI display (SPI DMA needs internal SRAM). */
     buf1 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
                                            MALLOC_CAP_SPIRAM);
+    buf2 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
+                                           MALLOC_CAP_SPIRAM);
     staging = (lv_color_t *)heap_caps_malloc(
                   LCD_WIDTH * STAGING_LINES * sizeof(lv_color_t),
                   MALLOC_CAP_DMA);
-    if (!buf1 || !staging) {
+    if (!buf1 || !buf2 || !staging) {
         Serial.println("LVGL buffer alloc failed!");
         while (true) delay(1000);
     }
-    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LV_BUF_SIZE);
+    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LV_BUF_SIZE);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);
@@ -511,19 +518,7 @@ void loop() {
         }
     }
 
-    // When screen is off, skip LVGL rendering and throttle the loop
-    if (!screen_active) {
-        // Still service BLE so notifications/time sync arrive
-        if (bt_enabled) gb_loop();
-        // Service timer/alarm (they can fire while screen off)
-        screen_manager_loop();
-        sound_loop();
-        // Throttle CPU – 50 ms idle gives ~20 Hz poll rate for button/IMU
-        delay(50);
-        return;
-    }
-
-    // Service LVGL (render + input processing)
+    // Service LVGL
     lv_timer_handler();
 
     // Service Gadgetbridge BLE

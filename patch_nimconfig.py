@@ -8,6 +8,7 @@ Runs automatically before each build; safe to re-run (idempotent).
 Import("env")
 
 import os
+import re
 
 def patch_nimconfig(source, target, env):
     nimconfig = os.path.join(
@@ -42,10 +43,10 @@ def patch_nimconfig(source, target, env):
     for macro in macros:
         # Add #undef before each #define to prevent redefinition warning.
         # Handle both '#define MACRO' and '#  define MACRO' variants.
-        import re
+        # Patch ALL occurrences (a macro may appear in multiple #if branches).
         pattern = r'^(\s*#\s*define\s+' + re.escape(macro) + r')\b'
         replacement = r'#undef ' + macro + r'\n\1'
-        content = re.sub(pattern, replacement, content, count=1, flags=re.MULTILINE)
+        content = re.sub(pattern, replacement, content, flags=re.MULTILINE)
 
     content = "/* patched by patch_nimconfig.py */\n" + content
 
@@ -54,6 +55,5 @@ def patch_nimconfig(source, target, env):
 
     print("  [patch_nimconfig] Patched nimconfig.h to suppress redefinition warnings")
 
-env.AddPreAction("buildprog", patch_nimconfig)
-# Also run before library compilation
-env.AddPreAction("$BUILD_DIR/lib", patch_nimconfig)
+# Run immediately during script load (before library compilation begins)
+patch_nimconfig(None, None, env)
