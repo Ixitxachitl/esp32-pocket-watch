@@ -53,13 +53,13 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
     6 /* col_offset */, 0, 0, 0);
 
 // ── LVGL draw buffer ────────────────────────────────────────────────────────
-// Full-frame double-buffered in PSRAM for clean refreshes (no partial artifacts).
-// A small internal-DMA staging buffer shuttles pixel data to the QSPI display.
+// Single full-frame buffer in PSRAM for direct_mode rendering.
+// No second buffer needed: the QSPI display has its own framebuffer,
+// so LVGL can safely render in-place without sync-copy overhead.
 static const uint32_t LV_BUF_SIZE     = LCD_WIDTH * LCD_HEIGHT;  // full frame in PSRAM
-static const uint32_t STAGING_LINES   = 120;               // SPI staging strip (larger = fewer DMA roundtrips)
+static const uint32_t STAGING_LINES   = 40;                // SPI staging strip (40 lines ≈ 36 KB internal DMA RAM)
 static lv_disp_draw_buf_t draw_buf;
 static lv_color_t *buf1    = nullptr;   // PSRAM
-static lv_color_t *buf2    = nullptr;   // PSRAM
 static lv_color_t *staging = nullptr;   // internal DMA
 
 // ── LVGL flush callback ────────────────────────────────────────────────────
@@ -99,16 +99,6 @@ static void my_disp_flush(lv_disp_drv_t *drv, const lv_area_t *area,
         rows_left -= chunk_h;
     }
     gfx->endWrite();
-
-    /* direct_mode + double-buffer: copy the dirty area from the buffer
-       we just rendered into the other buffer so both stay in sync.
-       Without this, alternating frames show stale content → visual bounce. */
-    lv_color_t *other = (color_p == buf1) ? buf2 : buf1;
-    for (lv_coord_t row = area->y1; row <= area->y2; row++) {
-        memcpy((uint16_t *)other + (uint32_t)row * LCD_WIDTH + area->x1,
-               (uint16_t *)color_p + (uint32_t)row * LCD_WIDTH + area->x1,
-               w * sizeof(uint16_t));
-    }
 
     lv_disp_flush_ready(drv);
 }
@@ -375,21 +365,19 @@ void setup() {
     // ── LVGL init ───────────────────────────────────────────────────────────
     lv_init();
 
-    /* Render buffers in PSRAM (large, for fewer strips/less tearing).
+    /* Single render buffer in PSRAM (full frame, direct_mode).
        A small internal-DMA staging buffer is used in the flush callback
        to shuttle chunks to the QSPI display (SPI DMA needs internal SRAM). */
     buf1 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
                                            MALLOC_CAP_SPIRAM);
-    buf2 = (lv_color_t *)heap_caps_malloc(LV_BUF_SIZE * sizeof(lv_color_t),
-                                           MALLOC_CAP_SPIRAM);
     staging = (lv_color_t *)heap_caps_malloc(
                   LCD_WIDTH * STAGING_LINES * sizeof(lv_color_t),
                   MALLOC_CAP_DMA);
-    if (!buf1 || !buf2 || !staging) {
+    if (!buf1 || !staging) {
         Serial.println("LVGL buffer alloc failed!");
         while (true) delay(1000);
     }
-    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, LV_BUF_SIZE);
+    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, LV_BUF_SIZE);
 
     static lv_disp_drv_t disp_drv;
     lv_disp_drv_init(&disp_drv);

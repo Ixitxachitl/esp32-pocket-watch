@@ -16,6 +16,7 @@
 #include "ESP_I2S.h"
 #include "pin_config.h"
 #include <math.h>
+#include <esp_heap_caps.h>
 
 /* ── ES8311 I2C address & key registers ──────────────────────── */
 #define PA_PIN       PA    /* Power-amplifier enable from pin_config.h */
@@ -54,9 +55,10 @@
 #define DING_SAMPLES  ((SAMPLE_RATE * DING_DURATION_MS) / 1000)
 #define CLICK_SAMPLES ((SAMPLE_RATE * CLICK_DURATION_MS) / 1000)
 
-/* Stereo 16-bit: 2 channels × 2 bytes = 4 bytes per sample */
-static int16_t ding_pcm[DING_SAMPLES * 2];    /* L+R interleaved */
-static int16_t click_pcm[CLICK_SAMPLES * 2];
+/* Stereo 16-bit: 2 channels × 2 bytes = 4 bytes per sample.
+   Allocated in PSRAM to save internal SRAM (i2s.write copies to DMA buffers). */
+static int16_t *ding_pcm  = nullptr;
+static int16_t *click_pcm = nullptr;
 
 static I2SClass i2s;
 static bool _sound_ok = false;
@@ -194,6 +196,14 @@ void sound_init(int buzzer_pin) {
         return;
     }
 
+    /* Allocate PCM buffers in PSRAM (i2s.write copies into internal DMA buffers) */
+    ding_pcm  = (int16_t *)heap_caps_malloc(DING_SAMPLES  * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    click_pcm = (int16_t *)heap_caps_malloc(CLICK_SAMPLES * 2 * sizeof(int16_t), MALLOC_CAP_SPIRAM);
+    if (!ding_pcm || !click_pcm) {
+        Serial.println("Sound: PCM alloc failed");
+        return;
+    }
+
     /* Pre-generate tone buffers */
     generate_tone(ding_pcm,  DING_SAMPLES,  DING_FREQ);
     generate_tone(click_pcm, CLICK_SAMPLES, CLICK_FREQ);
@@ -203,13 +213,13 @@ void sound_init(int buzzer_pin) {
 }
 
 void sound_play_ding(void) {
-    if (!_sound_ok) return;
-    i2s.write((uint8_t *)ding_pcm, sizeof(ding_pcm));
+    if (!_sound_ok || !ding_pcm) return;
+    i2s.write((uint8_t *)ding_pcm, DING_SAMPLES * 2 * sizeof(int16_t));
 }
 
 void sound_play_click(void) {
-    if (!_sound_ok) return;
-    i2s.write((uint8_t *)click_pcm, sizeof(click_pcm));
+    if (!_sound_ok || !click_pcm) return;
+    i2s.write((uint8_t *)click_pcm, CLICK_SAMPLES * 2 * sizeof(int16_t));
 }
 
 /* ── RTTTL player ─────────────────────────────────────────────── */
